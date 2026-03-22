@@ -1,6 +1,7 @@
 import os
 import shutil
 import json
+# NEW CODE
 
 # Get absolute paths
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -20,7 +21,6 @@ for filename in os.listdir(FACES_EMBEDDING_DIRECTORY):
     with open(embed_file, 'r') as f:
         data = json.load(f)    
     FACES_EMBEDDINGS[filename]=data
-
 
 
 # Create directories if they don't exist

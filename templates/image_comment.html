@@ -1,0 +1,675 @@
+<!-- Image Comment Window Template -->
+<div class="fullscreen-overlay" id="comment-modal" style="display: none;">
+    <div class="fullscreen-content">
+        <div class="image-container" style="position: relative; display: inline-block;">
+            <img id="fullscreen-image" class="fullscreen-image" src="" alt="">
+            <canvas id="face-canvas" class="face-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;"></canvas>
+            <div id="face-rectangles" class="face-rectangles-container" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: auto;"></div>
+        </div>
+        <div class="fullscreen-controls">
+            <div class="button-row">
+                <button id="record-button" class="record-button">
+                    <span class="recording-indicator"></span>🎤 Record
+                </button>
+                <button id="comment-button" class="comment-button">💬 Add Comment</button>
+                <button id="face-button" class="face-button">👤 Find Face</button>
+                <button id="search-face-button" class="search-face-button" style="display: none;">🔍 Search Face</button>
+            </div>
+            <div id="comments-list" class="comments-list">
+                <p style="color: #999; text-align: center;">Loading comments...</p>
+            </div>
+        </div>
+    </div>
+    <button id="close-btn" class="close-btn">✕</button>
+</div>
+
+<script>
+(function() {
+    // State
+    const state = {
+        audioPlayers: new Map(),
+        mediaRecorder: null,
+        audioChunks: [],
+        isRecording: false,
+        currentFilename: '',
+        onCounterUpdateCallback: null,
+        faceBoxes: [],
+        showFaces: false,
+        selectedFaceIndex: -1,
+        hoveredFaceIndex: -1,
+        imageNaturalSize: { width: 0, height: 0 }
+    };
+
+    // DOM elements cache
+    let elements = {};
+
+    function cacheElements() {
+        elements = {
+            modal: document.getElementById('comment-modal'),
+            image: document.getElementById('fullscreen-image'),
+            canvas: document.getElementById('face-canvas'),
+            faceRectangles: document.getElementById('face-rectangles'),
+            recordBtn: document.getElementById('record-button'),
+            commentBtn: document.getElementById('comment-button'),
+            faceBtn: document.getElementById('face-button'),
+            searchFaceBtn: document.getElementById('search-face-button'),
+            closeBtn: document.getElementById('close-btn'),
+            commentsList: document.getElementById('comments-list')
+        };
+    }
+
+    // Initialize the comment window
+    window.initCommentWindow = function(imageUrl, filename, counterCallback) {
+        cacheElements();
+        if (!elements.modal) return;
+        
+        state.currentFilename = filename;
+        state.onCounterUpdateCallback = counterCallback;
+        state.showFaces = false;
+        state.faceBoxes = [];
+        state.selectedFaceIndex = -1;
+        state.hoveredFaceIndex = -1;
+        
+        elements.image.src = imageUrl;
+        elements.image.onload = () => {
+            state.imageNaturalSize = {
+                width: elements.image.naturalWidth,
+                height: elements.image.naturalHeight
+            };
+            resizeCanvas();
+            if (state.showFaces) loadAndDrawFaces();
+        };
+        
+        elements.modal.style.display = 'flex';
+        document.body.style.overflow = 'hidden';
+        
+        loadComments();
+        setupEventListeners();
+        
+        // ESC key handler
+        const escHandler = (e) => e.key === 'Escape' && closeCommentWindow();
+        document.addEventListener('keydown', escHandler);
+        elements.modal.escHandler = escHandler;
+    };
+
+    function setupEventListeners() {
+        // Remove old listeners by cloning and replacing buttons
+        const newRecordBtn = elements.recordBtn.cloneNode(true);
+        const newCommentBtn = elements.commentBtn.cloneNode(true);
+        const newFaceBtn = elements.faceBtn.cloneNode(true);
+        const newSearchFaceBtn = elements.searchFaceBtn.cloneNode(true);
+        const newCloseBtn = elements.closeBtn.cloneNode(true);
+        
+        elements.recordBtn.replaceWith(newRecordBtn);
+        elements.commentBtn.replaceWith(newCommentBtn);
+        elements.faceBtn.replaceWith(newFaceBtn);
+        elements.searchFaceBtn.replaceWith(newSearchFaceBtn);
+        elements.closeBtn.replaceWith(newCloseBtn);
+        
+        // Update references
+        elements.recordBtn = newRecordBtn;
+        elements.commentBtn = newCommentBtn;
+        elements.faceBtn = newFaceBtn;
+        elements.searchFaceBtn = newSearchFaceBtn;
+        elements.closeBtn = newCloseBtn;
+        
+        // Add new listeners
+        elements.recordBtn.addEventListener('click', toggleRecording);
+        elements.commentBtn.addEventListener('click', showCommentForm);
+        elements.faceBtn.addEventListener('click', toggleFaceDetection);
+        elements.searchFaceBtn.addEventListener('click', searchSelectedFace);
+        elements.closeBtn.addEventListener('click', closeCommentWindow);
+        elements.modal.addEventListener('click', (e) => e.target === elements.modal && closeCommentWindow());
+        
+        window.addEventListener('resize', resizeCanvas);
+        
+        // Click outside face rectangles to deselect
+        elements.modal.addEventListener('click', (e) => {
+            if (!e.target.closest('.face-rectangle') && state.selectedFaceIndex !== -1) {
+                deselectFace();
+            }
+        });
+    }
+
+    // Face detection functions
+    async function toggleFaceDetection() {
+        state.showFaces = !state.showFaces;
+        
+        if (state.showFaces) {
+            elements.faceBtn.classList.add('pressed');
+            elements.faceBtn.style.background = 'linear-gradient(135deg, #4a6fa5, #166088)';
+            await loadAndDrawFaces();
+        } else {
+            elements.faceBtn.classList.remove('pressed');
+            elements.faceBtn.style.background = '';
+            clearFaceRectangles();
+            state.selectedFaceIndex = -1;
+            state.hoveredFaceIndex = -1;
+            elements.searchFaceBtn.style.display = 'none';
+        }
+    }
+
+    async function loadAndDrawFaces() {
+        try {
+            const response = await fetch(`/api/faces/${encodeURIComponent(state.currentFilename)}`);
+            const data = await response.json();
+            
+            if (data.faces?.length) {
+                state.faceBoxes = data.faces;
+                drawFaceRectangles();
+            } else {
+                alert('No face detection data found');
+                toggleFaceDetection();
+            }
+        } catch (error) {
+            console.error('Error loading faces:', error);
+            alert('Error loading face data');
+            toggleFaceDetection();
+        }
+    }
+
+    function drawFaceRectangles() {
+        if (!elements.faceRectangles || !elements.image.complete) return;
+        
+        const container = document.querySelector('.image-container');
+        const containerRect = container.getBoundingClientRect();
+        const imageRect = elements.image.getBoundingClientRect();
+        
+        // Clear existing rectangles
+        elements.faceRectangles.innerHTML = '';
+        
+        // Calculate scaling factors
+        const scaleX = imageRect.width / state.imageNaturalSize.width;
+        const scaleY = imageRect.height / state.imageNaturalSize.height;
+        
+        state.faceBoxes.forEach((box, index) => {
+            // Box coordinates are normalized [0-1]
+            const x = box[0] * imageRect.width;
+            const y = box[1] * imageRect.height;
+            const width = (box[2] - box[0]) * imageRect.width;
+            const height = (box[3] - box[1]) * imageRect.height;
+            
+            const rect = document.createElement('div');
+            rect.className = 'face-rectangle';
+            rect.setAttribute('data-face-index', index);
+            rect.style.cssText = `
+                position: absolute;
+                left: ${x}px;
+                top: ${y}px;
+                width: ${width}px;
+                height: ${height}px;
+                border: 3px solid ${index === state.selectedFaceIndex ? '#00ff00' : '#ff0000'};
+                box-shadow: ${index === state.hoveredFaceIndex ? '0 0 15px rgba(255, 255, 0, 0.7)' : 'none'};
+                transform: ${index === state.hoveredFaceIndex ? 'scale(1.02)' : 'scale(1)'};
+                transition: all 0.2s ease;
+                cursor: pointer;
+                pointer-events: auto;
+                z-index: ${index === state.selectedFaceIndex ? 100 : 10};
+            `;
+            
+            // Add hover effect
+            rect.addEventListener('mouseenter', () => {
+                if (state.hoveredFaceIndex !== index) {
+                    state.hoveredFaceIndex = index;
+                    drawFaceRectangles();
+                }
+            });
+            
+            rect.addEventListener('mouseleave', () => {
+                state.hoveredFaceIndex = -1;
+                drawFaceRectangles();
+            });
+            
+            // Add click handler
+            rect.addEventListener('click', (e) => {
+                e.stopPropagation();
+                selectFace(index);
+            });
+            
+            elements.faceRectangles.appendChild(rect);
+        });
+    }
+
+    function selectFace(index) {
+        if (state.selectedFaceIndex === index) return;
+        
+        state.selectedFaceIndex = index;
+        elements.searchFaceBtn.style.display = 'block';
+        drawFaceRectangles();
+    }
+
+    function deselectFace() {
+        state.selectedFaceIndex = -1;
+        elements.searchFaceBtn.style.display = 'none';
+        drawFaceRectangles();
+    }
+
+    function clearFaceRectangles() {
+        if (elements.faceRectangles) {
+            elements.faceRectangles.innerHTML = '';
+        }
+    }
+
+    function searchSelectedFace() {
+        if (state.selectedFaceIndex === -1) return;
+        
+        const selectedFace = state.faceBoxes[state.selectedFaceIndex];
+        const faceData = {
+            filename: state.currentFilename,
+            face_coordinates: selectedFace,
+            face_index: state.selectedFaceIndex
+        };
+        
+        console.log('Selected face data:', faceData);
+        
+        // Send to backend
+        fetch('/api/search-face', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(faceData)
+        })
+        .then(response => response.json())
+        .then(data => {
+            console.log('Search initiated:', data);
+        })
+        .catch(error => {
+            console.error('Error searching face:', error);
+        });
+    }
+
+    function resizeCanvas() {
+        if (elements.image.complete && state.showFaces && state.faceBoxes.length) {
+            drawFaceRectangles();
+        }
+    }
+
+    // Comments functions
+    async function loadComments() {
+        try {
+            const response = await fetch(`/api/comments/${encodeURIComponent(state.currentFilename)}`);
+            const data = await response.json();
+            const comments = data.comments.sort((a, b) => 
+                new Date(a.date || 0) - new Date(b.date || 0)
+            );
+            
+            if (comments.length) {
+                elements.commentsList.innerHTML = '';
+                comments.forEach(comment => {
+                    elements.commentsList.appendChild(createCommentElement(comment));
+                });
+                preloadAudioDurations(comments);
+            } else {
+                elements.commentsList.innerHTML = '<p style="color: #999; text-align: center;">No comments yet. Be the first to add one!</p>';
+            }
+        } catch (error) {
+            console.error('Error loading comments:', error);
+            elements.commentsList.innerHTML = '<p style="color: #ff6b6b; text-align: center;">Error loading comments</p>';
+        }
+    }
+
+    function createCommentElement(comment) {
+        return comment.audio_recognizer === 'vosk' 
+            ? createAudioCommentElement(comment)
+            : createTextCommentElement(comment);
+    }
+
+    function createTextCommentElement(comment) {
+        const div = document.createElement('div');
+        div.className = 'comment-item';
+        div.innerHTML = `
+            <div class="comment-text">${comment.text}</div>
+            <div class="comment-date">${comment.date}</div>
+        `;
+        
+        // Check if comment needs expand/collapse
+        setTimeout(() => checkCommentHeight(div), 10);
+        return div;
+    }
+
+    function createAudioCommentElement(comment) {
+        const div = document.createElement('div');
+        div.className = 'audio-comment';
+        div.setAttribute('data-audio-url', comment.audio_url);
+        div.innerHTML = `
+            <div class="audio-info">
+                <div>${comment.text}</div>
+                <div class="audio-date">${comment.date}</div>
+            </div>
+            <div class="audio-controls">
+                <button class="audio-play-btn play">▶</button>
+                <button class="audio-stop-btn">■</button>
+                <div class="audio-progress-container">
+                    <input type="range" class="audio-progress-slider" min="0" max="100" value="0" step="0.1">
+                    <div class="audio-time-display">0:00 / 0:00</div>
+                </div>
+            </div>
+        `;
+        
+        // Setup audio controls
+        const playBtn = div.querySelector('.audio-play-btn');
+        const stopBtn = div.querySelector('.audio-stop-btn');
+        const slider = div.querySelector('.audio-progress-slider');
+        
+        playBtn.onclick = (e) => {
+            e.stopPropagation();
+            toggleAudio(div, playBtn);
+        };
+        
+        stopBtn.onclick = (e) => {
+            e.stopPropagation();
+            stopAudio(div, playBtn);
+        };
+        
+        slider.addEventListener('input', (e) => {
+            e.stopPropagation();
+            seekAudio(div, e.target.value);
+        });
+        
+        return div;
+    }
+
+    function checkCommentHeight(commentDiv) {
+        const textDiv = commentDiv.querySelector('.comment-text');
+        if (!textDiv) return;
+        
+        const lineHeight = parseFloat(getComputedStyle(textDiv).lineHeight);
+        if (textDiv.scrollHeight > lineHeight * 3) {
+            textDiv.classList.add('collapsed');
+            commentDiv.classList.add('expandable');
+            
+            const ellipsis = document.createElement('span');
+            ellipsis.className = 'comment-ellipsis';
+            ellipsis.textContent = '...';
+            commentDiv.appendChild(ellipsis);
+            
+            commentDiv.addEventListener('click', (e) => {
+                if (e.target.classList.contains('comment-date') || 
+                    e.target.classList.contains('comment-ellipsis')) return;
+                
+                textDiv.classList.toggle('collapsed');
+                textDiv.classList.toggle('expanded');
+                ellipsis.style.display = textDiv.classList.contains('collapsed') ? 'block' : 'none';
+            });
+        }
+    }
+
+    // Recording functions
+    async function toggleRecording() {
+        if (!state.isRecording) {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                state.mediaRecorder = new MediaRecorder(stream);
+                state.audioChunks = [];
+                
+                state.mediaRecorder.ondataavailable = (e) => e.data.size && state.audioChunks.push(e.data);
+                state.mediaRecorder.onstop = uploadAudio;
+                
+                state.mediaRecorder.start();
+                state.isRecording = true;
+                
+                elements.recordBtn.innerHTML = '<span class="recording-indicator"></span>⏹️ Stop Recording';
+                elements.recordBtn.classList.add('recording');
+                elements.image.classList.add('recording');
+            } catch (error) {
+                alert('Microphone access denied');
+            }
+        } else {
+            if (state.mediaRecorder?.state !== 'inactive') {
+                state.mediaRecorder.stop();
+                state.isRecording = false;
+                
+                elements.recordBtn.innerHTML = '<span class="recording-indicator"></span>🎤 Record';
+                elements.recordBtn.classList.remove('recording');
+                elements.image.classList.remove('recording');
+                
+                // Stop all tracks
+                state.mediaRecorder.stream?.getTracks().forEach(t => t.stop());
+            }
+        }
+    }
+
+    async function uploadAudio() {
+        const audioBlob = new Blob(state.audioChunks, { type: 'audio/wav' });
+        const formData = new FormData();
+        formData.append('audio_file', audioBlob, `${state.currentFilename}.wav`);
+        
+        try {
+            const response = await fetch(`/api/audio/${encodeURIComponent(state.currentFilename)}`, {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                addCommentToUI(data.comment);
+                state.onCounterUpdateCallback?.();
+            }
+        } catch (error) {
+            console.error('Upload error:', error);
+        }
+    }
+
+    // Comment form
+    function showCommentForm() {
+        elements.commentBtn.style.display = 'none';
+        
+        const form = document.createElement('div');
+        form.className = 'comment-section';
+        form.innerHTML = `
+            <h3 style="color: white; margin-bottom: 15px;">Add Comment</h3>
+            <form class="comment-form">
+                <textarea class="comment-textarea" placeholder="Write your comment here..." required></textarea>
+                <div class="comment-buttons">
+                    <button type="button" class="cancel-btn">Cancel</button>
+                    <button type="submit" class="save-btn" disabled>Save Comment</button>
+                </div>
+            </form>
+        `;
+        
+        elements.modal.querySelector('.fullscreen-controls').insertBefore(form, elements.commentsList);
+        
+        const textarea = form.querySelector('textarea');
+        const saveBtn = form.querySelector('.save-btn');
+        const cancelBtn = form.querySelector('.cancel-btn');
+        
+        textarea.addEventListener('input', () => saveBtn.disabled = !textarea.value.trim());
+        
+        form.querySelector('form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await saveComment(textarea.value.trim());
+            form.remove();
+            elements.commentBtn.style.display = 'block';
+        });
+        
+        cancelBtn.addEventListener('click', () => {
+            form.remove();
+            elements.commentBtn.style.display = 'block';
+        });
+    }
+
+    async function saveComment(text) {
+        const formData = new FormData();
+        formData.append('comment', text);
+        
+        try {
+            const response = await fetch(`/api/comments/${encodeURIComponent(state.currentFilename)}`, {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                addCommentToUI(data.comment);
+                state.onCounterUpdateCallback?.();
+            }
+        } catch (error) {
+            console.error('Save error:', error);
+        }
+    }
+
+    function addCommentToUI(comment) {
+        if (elements.commentsList.innerHTML.includes('No comments yet')) {
+            elements.commentsList.innerHTML = '';
+        }
+        elements.commentsList.appendChild(createCommentElement(comment));
+    }
+
+    // Audio playback
+    async function preloadAudioDurations(comments) {
+        for (const comment of comments.filter(c => c.audio_recognizer === 'vosk')) {
+            const url = comment.audio_url;
+            if (!state.audioPlayers.has(url)) await preloadAudio(url);
+        }
+    }
+
+    async function preloadAudio(url) {
+        const audio = new Audio(url);
+        await new Promise((resolve) => {
+            audio.addEventListener('loadedmetadata', () => resolve(audio.duration));
+            audio.load();
+        });
+        
+        state.audioPlayers.set(url, {
+            audio,
+            duration: audio.duration,
+            isPlaying: false
+        });
+        
+        updateAudioUI(url);
+    }
+
+    function updateAudioUI(url) {
+        const item = document.querySelector(`[data-audio-url="${url}"]`);
+        if (!item) return;
+        
+        const player = state.audioPlayers.get(url);
+        const timeDisplay = item.querySelector('.audio-time-display');
+        const slider = item.querySelector('.audio-progress-slider');
+        
+        if (timeDisplay) timeDisplay.textContent = `0:00 / ${formatTime(player.duration)}`;
+        if (slider) {
+            player.slider = slider;
+            player.timeDisplay = timeDisplay;
+        }
+    }
+
+    function toggleAudio(item, btn) {
+        const url = item.getAttribute('data-audio-url');
+        
+        if (!state.audioPlayers.has(url)) {
+            preloadAudio(url).then(() => toggleAudio(item, btn));
+            return;
+        }
+        
+        const player = state.audioPlayers.get(url);
+        
+        if (player.isPlaying) {
+            player.audio.pause();
+            player.isPlaying = false;
+            btn.className = 'audio-play-btn play';
+            btn.innerHTML = '▶';
+        } else {
+            // Stop all others
+            state.audioPlayers.forEach((p, u) => {
+                if (u !== url && p.isPlaying) {
+                    p.audio.pause();
+                    p.isPlaying = false;
+                    document.querySelector(`[data-audio-url="${u}"] .audio-play-btn`).className = 'audio-play-btn play';
+                }
+            });
+            
+            if (!player.timeHandler) {
+                player.timeHandler = () => updateProgress(url);
+                player.audio.addEventListener('timeupdate', player.timeHandler);
+            }
+            
+            player.audio.play();
+            player.isPlaying = true;
+            btn.className = 'audio-play-btn pause';
+            btn.innerHTML = '⏸️';
+        }
+    }
+
+    function stopAudio(item, btn) {
+        const url = item.getAttribute('data-audio-url');
+        const player = state.audioPlayers.get(url);
+        
+        if (player) {
+            player.audio.pause();
+            player.audio.currentTime = 0;
+            player.isPlaying = false;
+            
+            btn.className = 'audio-play-btn play';
+            btn.innerHTML = '▶';
+            
+            if (player.slider) player.slider.value = 0;
+            updateTimeDisplay(url);
+        }
+    }
+
+    function seekAudio(item, value) {
+        const player = state.audioPlayers.get(item.getAttribute('data-audio-url'));
+        if (player) {
+            player.audio.currentTime = (value / 100) * player.duration;
+            updateTimeDisplay(item.getAttribute('data-audio-url'));
+        }
+    }
+
+    function updateProgress(url) {
+        const player = state.audioPlayers.get(url);
+        if (player?.audio.duration) {
+            const percent = (player.audio.currentTime / player.audio.duration) * 100;
+            if (player.slider) player.slider.value = percent;
+            updateTimeDisplay(url);
+        }
+    }
+
+    function updateTimeDisplay(url) {
+        const player = state.audioPlayers.get(url);
+        if (player?.timeDisplay) {
+            player.timeDisplay.textContent = `${formatTime(player.audio.currentTime)} / ${formatTime(player.duration)}`;
+        }
+    }
+
+    function formatTime(seconds) {
+        if (!seconds || isNaN(seconds)) return '0:00';
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+    }
+
+    // Cleanup
+    function closeCommentWindow() {
+        if (state.isRecording && state.mediaRecorder?.state !== 'inactive') {
+            state.mediaRecorder.stop();
+        }
+        
+        state.audioPlayers.forEach(p => {
+            p.audio.pause();
+            p.audio.currentTime = 0;
+        });
+        state.audioPlayers.clear();
+        
+        if (elements.modal?.escHandler) {
+            document.removeEventListener('keydown', elements.modal.escHandler);
+        }
+        
+        window.removeEventListener('resize', resizeCanvas);
+        elements.modal.style.display = 'none';
+        document.body.style.overflow = '';
+        
+        // Reset state
+        state.isRecording = false;
+        state.showFaces = false;
+        state.faceBoxes = [];
+        state.selectedFaceIndex = -1;
+        state.hoveredFaceIndex = -1;
+        clearFaceRectangles();
+    }
+
+    // Make functions available globally
+    window.closeCommentWindow = closeCommentWindow;
+})();
+</script>
